@@ -1,7 +1,7 @@
 // Billing helpers. Amounts are numbers in major currency units.
 
 export function round2(value) {
-  return Math.round(value * 100) / 100;
+  return Math.round((value + Number.EPSILON) * 100) / 100;
 }
 
 export function lineTotal({ unitPrice, quantity }) {
