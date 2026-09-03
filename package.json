@@ -1,0 +1,19 @@
+{
+  "name": "opencomputer-example-issue-filer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@opencomputer/agent": "^0.5.2"
+  },
+  "devDependencies": {
+    "@opencomputer/cli": "^0.6.6",
+    "typescript": "^5.9.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
+}
