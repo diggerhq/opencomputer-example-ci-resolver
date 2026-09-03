@@ -1,9 +1,7 @@
 // Billing helpers. Amounts are numbers in major currency units.
 
 export function round2(value) {
-  // Compensate for binary floating point before rounding half-up, so that
-  // values such as 0.615 do not land just below the boundary.
-  return Math.round((value + Number.EPSILON) * 100) / 100;
+  return Math.round(value * 100) / 100;
 }
 
 export function lineTotal({ unitPrice, quantity }) {
