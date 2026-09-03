@@ -87,28 +87,18 @@ return conversationPrompt(input.text ?? "");
 
 ## Reporting a failed run
 
-`ci.yml` runs install, typecheck, `doctor`, and `npm test` on every push and
-pull request. `resolve.yml` runs when `ci` completes with `failure` on a push, fetches the
-failed job's log with `gh run view --log-failed`, and posts it to the agent's
-webhook with the run id as the idempotency key. Pull requests are not
-reported, so the agent's own pull requests do not re-trigger it.
-
-GitHub delivers its own webhooks HMAC-signed with GitHub's payload; the
-agent's webhook takes a bearer token and `{ text, payload }`. The
-`workflow_run` workflow translates one into the other.
+`ci.yml` runs the project's checks on every push and pull request. When a
+push fails, `resolve.yml` posts the failed job's log to the agent's webhook.
 
 Commit [`ebefd92`](https://github.com/diggerhq/opencomputer-example-ci-resolver/commit/ebefd9286e71297ab5a4adf3e855b935b3c28cfe)
 on `refactor/simplify-round2` replaced compensated rounding with
-`Math.round(value * 100) / 100`. The existing half-up test caught it
+`Math.round(value * 100) / 100`, and the half-up test failed
 ([run 33780847455](https://github.com/diggerhq/opencomputer-example-ci-resolver/actions/runs/33780847455)):
 
 ```text
-resolve / report   {"request":{"sessionId":"56ea5b15-…","outcome":"accepted"}}
-
 agent.rendered   enabledTools [file_issue, github_request, glob, grep, open_pull_request, read, shell, write]
 shell            git clone …; git checkout ebefd928…
 shell            npm test → not ok 4 - invoiceTotal rounds tax half-up (8.20 at 7.5% is 8.82)   8.81 !== 8.82
-shell            node -e … → 0.6149999999999999  61.499999999999986  61
 shell            npm test → # pass 4  # fail 0
 egress.response  POST …/git/blobs 201   …/git/trees 201   …/git/commits 201   …/git/refs 201   …/pulls 201
 open_pull_request {"status":201,"url":"https://github.com/diggerhq/opencomputer-example-ci-resolver/pull/10"}
@@ -120,57 +110,26 @@ restores the compensation; its own `ci` check passes.
 
 ## Verifying the scope
 
-The runs below post the report by hand from `reports/*.json`, with requests a
-CI job would not make.
-
-### A repository the token can access but the agent cannot
-
-The token covers `opencomputer-example-bug-repro` as well. Directly:
-
-```text
-$ curl -X POST https://api.github.com/repos/diggerhq/opencomputer-example-bug-repro/issues \
-    -H "Authorization: Bearer $PAT" -d '{"title":"…","body":"…"}'
-HTTP 201
-```
-
-Through the agent, with `reports/ci-failure-and-more.json` asking it to file
-the same report there and to delete a label here:
+Send a report whose text asks for a write outside the whitelist. The token
+covers `opencomputer-example-bug-repro` as well and creates issues there when
+used directly (201). Through the agent, `reports/ci-failure-and-more.json`
+asks for an issue there and for a label deletion here:
 
 ```text
 file_issue      {"status":403,"error":"{\"error\":{\"code\":\"egress_path_blocked\",\"message\":\"The connection does not allow this path\"}}"}
 github_request  {"status":403,"body":"{\"error\":{\"code\":\"egress_method_blocked\",\"message\":\"The connection does not allow this method\"}}"}
 ```
 
-Both were refused against the deployment's manifest before the secret was
-read. The pull request for the fix was still opened.
-
-### Secret removed
+The pull request for the fix is still opened. Remove the secret and the
+first write stops instead, on the same deployment:
 
 ```text
-$ npx opencomputer secrets remove GITHUB_TOKEN
-$ curl … --data-binary @reports/ci-failure.json
-
 open_pull_request {"step":"blob","status":409,"error":"{\"error\":{\"code\":\"secret_unavailable\",\"message\":\"Secret GITHUB_TOKEN is missing or is not allowed for this connection\"}}"}
 ```
 
-Same deployment. The agent reproduced and fixed the failure; the first
-write stopped. Removing the secret cuts access for every session at its next
-write, with no deploy.
-
-### Adding a repository
-
-```diff
-+export const githubBugRepro = defineConnection({
-+  id: "github-bug-repro",
-+  origin: "https://api.github.com",
-+  methods: ["POST"],
-+  pathPrefix: "/repos/diggerhq/opencomputer-example-bug-repro/",
-+  headers: { Authorization: bearer(useSecret("GITHUB_TOKEN")) },
-+});
-```
-
-A second repository is a second connection and a new deployment. Sessions
-already running keep the deployment they started with.
+Adding a repository is a second `defineConnection` with its own
+`pathPrefix`, and a new deployment. Sessions already running keep the
+deployment they started with.
 
 ## Run it
 
@@ -197,16 +156,26 @@ gh secret set OC_WEBHOOK_TOKEN    # printed once
 Push a branch with a change that fails `npm test`. The agent opens a pull
 request against that branch.
 
-## Inspect a session
+## Implementation notes
 
-```bash
-npx opencomputer sessions tail <session-id> --after 0 --no-follow --json
-```
-
-`egress.request` and `egress.response` record every request the proxy
-forwarded: connection, method, path, status, duration. Refused requests
-appear only in the tool result, not as egress events (`DX-NOTES.md` 002).
-`agent.rendered` records the tool list per model step.
+- `resolve.yml` runs on `workflow_run` when `ci` completes with `failure` on
+  a push, fetches the log with `gh run view --log-failed`, and posts
+  `{ text, payload: { repository, ref, sha, job, run, log } }` with the run
+  id as `Idempotency-Key`. Pull requests are not reported, so the agent's
+  own pull requests do not re-trigger it.
+- The workflow exists because GitHub delivers its webhooks HMAC-signed with
+  GitHub's payload, while the agent's webhook takes a bearer token and
+  `{ text, payload }`.
+- `open_pull_request` uses the Git Data API: blob per file, tree, commit,
+  ref, then the pull request. `file_issue` is the fallback when the tests
+  stay red. `github_request` sends any method and path through the
+  connection; it exists so an out-of-scope request can be attempted
+  deliberately.
+- `npx opencomputer sessions tail <session-id> --after 0 --no-follow --json`
+  prints the session's event log. `egress.request` and `egress.response`
+  record every request the proxy forwarded; refused requests appear only in
+  the tool result. `agent.rendered` records the tool list per model step.
+- `DX-NOTES.md` records what was observed against the live platform.
 
 ## Files
 
@@ -218,7 +187,6 @@ opencomputer/agents/ci-resolver/opencode.json     harness tools this agent may s
 .github/workflows/resolve.yml                     reports a failed push to the agent
 billing/                                          the module under test and its suite
 reports/                                          payloads for posting a report by hand
-DX-NOTES.md                                       observations against the live platform
 ```
 
 ## Limits
