@@ -1,9 +1,9 @@
-// A small billing module. Amounts are numbers in major currency units.
-// The test suite fails on purpose on the fixture-ci branch; that failure is
-// what the resolver fixes. Do not fix it on main.
+// Billing helpers. Amounts are numbers in major currency units.
 
 export function round2(value) {
-  return Math.round(value * 100) / 100;
+  // Compensate for binary floating point before rounding half-up, so that
+  // values such as 0.615 do not land just below the boundary.
+  return Math.round((value + Number.EPSILON) * 100) / 100;
 }
 
 export function lineTotal({ unitPrice, quantity }) {

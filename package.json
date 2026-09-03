@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --test billing/test/*.test.js"
   },
   "dependencies": {
     "@opencomputer/agent": "^0.5.2"

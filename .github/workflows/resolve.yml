@@ -1,0 +1,47 @@
+# When `ci` fails on a push, hand the failed run to the resolver. This is the
+# translation step GitHub needs today: GitHub's own webhooks are HMAC-signed
+# with GitHub's payload, while the agent's webhook takes a bearer token and a
+# `{ text, payload }` body. The `ci` workflow itself stays untouched.
+name: resolve
+
+on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+
+jobs:
+  report:
+    if: github.event.workflow_run.conclusion == 'failure' && github.event.workflow_run.event == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+    env:
+      GH_TOKEN: ${{ github.token }}
+      OC_WEBHOOK_URL: ${{ secrets.OC_WEBHOOK_URL }}
+      OC_WEBHOOK_TOKEN: ${{ secrets.OC_WEBHOOK_TOKEN }}
+      REPOSITORY: ${{ github.repository }}
+      REF: ${{ github.event.workflow_run.head_branch }}
+      SHA: ${{ github.event.workflow_run.head_sha }}
+      JOB: ${{ github.event.workflow_run.name }}
+      RUN_ID: ${{ github.event.workflow_run.id }}
+      RUN_URL: ${{ github.event.workflow_run.html_url }}
+    steps:
+      - name: Fetch the failed job's log
+        run: gh run view "$RUN_ID" -R "$REPOSITORY" --log-failed > "$RUNNER_TEMP/failed.log"
+      - name: Report to the resolver
+        run: |
+          node -e '
+            const fs = require("fs");
+            const log = fs.readFileSync(process.env.RUNNER_TEMP + "/failed.log", "utf8")
+              .split("\n").map((l) => l.replace(/^[^\t]*\t[^\t]*\t\S+ /, "")).slice(-80).join("\n");
+            const { REPOSITORY, REF, SHA, JOB, RUN_URL } = process.env;
+            process.stdout.write(JSON.stringify({
+              text: `CI failed: ${JOB} on ${REF}. Fix it and open a pull request.`,
+              payload: { repository: REPOSITORY, ref: REF, sha: SHA, job: JOB, run: RUN_URL, log },
+            }));
+          ' > "$RUNNER_TEMP/report.json"
+          curl -fsS -X POST "$OC_WEBHOOK_URL" \
+            -H "Authorization: Bearer $OC_WEBHOOK_TOKEN" \
+            -H "Content-Type: application/json" \
+            -H "Idempotency-Key: $RUN_ID" \
+            --data-binary @"$RUNNER_TEMP/report.json"

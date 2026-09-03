@@ -1,9 +1,0 @@
-{
-  "text": "CI failed on fixture-ci. Fix it and open a pull request.",
-  "payload": {
-    "repository": "diggerhq/opencomputer-example-ci-resolver",
-    "ref": "fixture-ci",
-    "job": "fixture / test (node 22)",
-    "log": "$ cd fixture && npm test\n\n> node --test test/*.test.js\n\nTAP version 13\n# Subtest: invoiceTotal rounds tax half-up (8.20 at 7.5% is 8.82)\nnot ok 4 - invoiceTotal rounds tax half-up (8.20 at 7.5% is 8.82)\n  ---\n  duration_ms: 2.14\n  location: 'test/invoice.test.js:24:1'\n  failureType: 'testCodeFailure'\n  error: |-\n    Expected values to be strictly equal:\n\n    8.81 !== 8.82\n\n  code: 'ERR_ASSERTION'\n  expected: 8.82\n  actual: 8.81\n  ...\n1..4\n# tests 4\n# pass 3\n# fail 1\nnpm ERR! Test failed. See above for more details."
-  }
-}
