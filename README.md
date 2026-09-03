@@ -108,29 +108,6 @@ open_pull_request {"status":201,"url":"https://github.com/diggerhq/opencomputer-
 [Pull request #10](https://github.com/diggerhq/opencomputer-example-ci-resolver/pull/10)
 restores the compensation; its own `ci` check passes.
 
-## Verifying the scope
-
-Send a report whose text asks for a write outside the whitelist. The token
-covers `opencomputer-example-bug-repro` as well and creates issues there when
-used directly (201). Through the agent, `reports/ci-failure-and-more.json`
-asks for an issue there and for a label deletion here:
-
-```text
-file_issue      {"status":403,"error":"{\"error\":{\"code\":\"egress_path_blocked\",\"message\":\"The connection does not allow this path\"}}"}
-github_request  {"status":403,"body":"{\"error\":{\"code\":\"egress_method_blocked\",\"message\":\"The connection does not allow this method\"}}"}
-```
-
-The pull request for the fix is still opened. Remove the secret and the
-first write stops instead, on the same deployment:
-
-```text
-open_pull_request {"step":"blob","status":409,"error":"{\"error\":{\"code\":\"secret_unavailable\",\"message\":\"Secret GITHUB_TOKEN is missing or is not allowed for this connection\"}}"}
-```
-
-Adding a repository is a second `defineConnection` with its own
-`pathPrefix`, and a new deployment. Sessions already running keep the
-deployment they started with.
-
 ## Run it
 
 Requires Node 22, an OpenComputer account, and a fine-grained GitHub token
@@ -155,6 +132,41 @@ gh secret set OC_WEBHOOK_TOKEN    # printed once
 
 Push a branch with a change that fails `npm test`. The agent opens a pull
 request against that branch.
+
+## Verifying the scope
+
+Give your token access to a second repository you own. Edit
+`reports/ci-failure-and-more.json` so that its `text` asks the agent to file
+the report as an issue in that second repository and to delete a label in
+the whitelisted one, then post it to your webhook:
+
+```bash
+curl -X POST "$OC_WEBHOOK_URL" -H "Authorization: Bearer $OC_WEBHOOK_TOKEN" \
+  -H "Content-Type: application/json" -H "Idempotency-Key: verify-1" \
+  --data-binary @reports/ci-failure-and-more.json
+```
+
+The session's tool results show both requests refused, and the pull request
+for the fix still opened:
+
+```text
+file_issue      {"status":403,"error":"{\"error\":{\"code\":\"egress_path_blocked\",\"message\":\"The connection does not allow this path\"}}"}
+github_request  {"status":403,"body":"{\"error\":{\"code\":\"egress_method_blocked\",\"message\":\"The connection does not allow this method\"}}"}
+```
+
+The same token creates that issue when used from your machine (201).
+
+Remove the secret and post `reports/ci-failure.json` again. The agent
+reproduces and fixes the failure as before, and its first write stops, on
+the same deployment:
+
+```text
+open_pull_request {"step":"blob","status":409,"error":"{\"error\":{\"code\":\"secret_unavailable\",\"message\":\"Secret GITHUB_TOKEN is missing or is not allowed for this connection\"}}"}
+```
+
+To let the agent write to the second repository, add a `defineConnection`
+with its `pathPrefix` and deploy. Sessions already running keep the
+deployment they started with.
 
 ## Implementation notes
 
