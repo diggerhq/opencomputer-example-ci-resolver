@@ -21,15 +21,41 @@ export const github = defineConnection({
 });
 ```
 
-- The compiler copies this literal into the deployment manifest. Every
-  session is pinned to one deployment.
-- Each outbound request from a tool goes to the platform edge as
+`npx opencomputer deploy` does not upload this file as it is. It compiles the
+agent directory: bundles `agent.ts` and `tools/*.ts`, and reads every
+`defineConnection` out of the source, without executing it, into a manifest
+that is registered with the deployment. The entry it produced for the
+connection above, from `.opencomputer/runtime/.opencomputer/reactive.json`
+after a build:
+
+```json
+{
+  "id": "github",
+  "origin": "https://api.github.com",
+  "methods": ["POST"],
+  "pathPrefix": "/repos/diggerhq/opencomputer-example-ci-resolver/",
+  "headers": {
+    "Authorization": { "kind": "secret", "name": "GITHUB_TOKEN", "prefix": "Bearer " },
+    "Accept": "application/vnd.github+json",
+    "User-Agent": "opencomputer-example-ci-resolver"
+  }
+}
+```
+
+Origin, methods, prefix, and header values must be literals; a computed
+origin fails the build. So the manifest is a function of the source text, a
+reviewer reads the policy in the diff, and nothing that runs later can
+change it:
+
+- A deployment is immutable and identified by the hash of its contents.
+  Every session is pinned to one deployment.
+- Each outbound request from a tool reaches the platform edge as
   `(connection, method, path)`. The edge checks the method and the path
-  prefix against the pinned deployment, then attaches the secret. Requests
-  outside the prefix are refused before the secret is read.
-- `useSecret` is a reference. The value is set with
-  `secrets set GITHUB_TOKEN --value-stdin` and stored outside the
-  deployment. The agent's VM never holds it.
+  prefix against the pinned deployment's manifest, then attaches the secret.
+  Requests outside the prefix are refused before the secret is read.
+- The manifest holds the secret's name, not its value. The value is set with
+  `secrets set GITHUB_TOKEN --value-stdin`, stored outside the deployment,
+  and attached at the edge. The agent's VM never holds it.
 - Reads are local: `git clone`, `git checkout <sha>`, `npm test`. Writes are
   POSTs through the connection: blobs, tree, commit, ref, pull request.
 
