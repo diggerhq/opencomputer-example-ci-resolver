@@ -22,10 +22,9 @@ export const github = defineConnection({
 });
 ```
 
-`npx opencomputer deploy` does not upload this file as it is. It compiles the
-agent directory: bundles `agent.ts` and `tools/*.ts`, and reads every
-`defineConnection` out of the source, without executing it, into a manifest
-that is registered with the deployment. The entry it produced for the
+`npx opencomputer deploy` compiles the agent directory: it bundles `agent.ts`
+and `tools/*.ts`, and reads every `defineConnection` out of the source, as
+text, into a manifest that is registered with the deployment. The entry it produced for the
 connection above, from `.opencomputer/runtime/.opencomputer/reactive.json`
 after a build:
 
@@ -49,12 +48,12 @@ reviewer reads the policy in the diff, and nothing that runs later can
 change it:
 
 - A deployment is immutable. Every session is pinned to one deployment.
-- `github.fetch` does not connect to `api.github.com`. It sends the request
-  to OpenComputer's outbound proxy as connection id, method, path, headers,
-  and body. The proxy checks the method and path prefix against the
-  deployment's manifest, adds the `Authorization` header from the secret's
-  value, forwards the request to GitHub, and returns the response. Requests
-  outside the prefix are refused before the secret is read.
+- `github.fetch` sends each request to OpenComputer's outbound proxy as
+  connection id, method, path, headers, and body. The proxy checks the
+  method and path prefix against the deployment's manifest, adds the
+  `Authorization` header from the secret's value, forwards the request to
+  `api.github.com`, and returns the response. Requests outside the prefix
+  are refused before the secret is read.
 - The manifest holds the secret's name, not its value. The value is set with
   `secrets set GITHUB_TOKEN --value-stdin` and stored on the platform; only
   the proxy reads it. The agent's machine sends requests without the header
