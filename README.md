@@ -6,7 +6,8 @@ pull request against the branch.
 
 Its write access to GitHub is limited to the repositories listed in its
 code, whatever the token behind it is allowed to do. The token itself never
-enters the machine the agent runs in.
+enters the machine the agent runs in; requests leave through a proxy that
+adds it.
 
 ## How access is restricted
 
@@ -48,14 +49,16 @@ reviewer reads the policy in the diff, and nothing that runs later can
 change it:
 
 - A deployment is immutable. Every session is pinned to one deployment.
-- Each request a tool makes through the connection is checked against the
-  deployment's manifest, method and path prefix, before the secret is
-  attached. Requests outside the prefix are refused before the secret is
-  read.
+- `github.fetch` does not connect to `api.github.com`. It sends the request
+  to OpenComputer's outbound proxy as connection id, method, path, headers,
+  and body. The proxy checks the method and path prefix against the
+  deployment's manifest, adds the `Authorization` header from the secret's
+  value, forwards the request to GitHub, and returns the response. Requests
+  outside the prefix are refused before the secret is read.
 - The manifest holds the secret's name, not its value. The value is set with
-  `secrets set GITHUB_TOKEN --value-stdin`, stored outside the deployment,
-  and attached to the request outside the agent's machine, which never holds
-  it.
+  `secrets set GITHUB_TOKEN --value-stdin` and stored on the platform; only
+  the proxy reads it. The agent's machine sends requests without the header
+  and never holds the token.
 - Reads are local: `git clone`, `git checkout <sha>`, `npm test`. Writes are
   POSTs through the connection: blobs, tree, commit, ref, pull request.
 
@@ -192,8 +195,8 @@ against that branch.
 npx opencomputer sessions tail <session-id> --after 0 --no-follow --json
 ```
 
-`egress.request` and `egress.response` record every request that passed the
-check: connection, method, path, status, duration. Refused requests appear
+`egress.request` and `egress.response` record every request the proxy
+forwarded: connection, method, path, status, duration. Refused requests appear
 only in the tool result, not as egress events (`DX-NOTES.md` 002).
 `agent.rendered` records the tool list per model step.
 
