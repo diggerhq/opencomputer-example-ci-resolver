@@ -1,13 +1,13 @@
 # CI resolver
 
-An OpenComputer Serverless Agent that takes a failing CI job, reproduces the
+An OpenComputer Serverless Agent that takes a failed CI run, reproduces the
 failure, fixes the code, and opens a pull request.
 
-Input: a failed GitHub Actions job. The job's last step posts the repository,
-branch, commit, job name, run URL, and log tail to the agent's webhook.
-Output: a pull request whose body quotes the failing assertion, the cause,
-the change, and the test output before and after. The pull request's own
-checks then run on the fix.
+Input: a failed GitHub Actions run on a push. A companion workflow posts the
+repository, branch, commit, job name, run URL, and the failed job's log to
+the agent's webhook. Output: a pull request against the branch whose body
+quotes the failing assertion, the cause, the change, and the test output
+before and after. The pull request's own checks then run on the fix.
 
 The example exists to show one property: the agent's write access to GitHub
 is a whitelist of repositories written in code, compiled into the deployment,
@@ -67,7 +67,7 @@ connection's, and the connection is in the deployment.
 // Simplified excerpt of opencomputer/agents/ci-resolver/agent.ts.
 export default function Agent() {
   const input = useInput();
-  const failure = (input.payload ?? {}) as { repository?: string; ref?: string; job?: string; log?: string };
+  const failure = (input.payload ?? {}) as { repository?: string; ref?: string; sha?: string; job?: string; run?: string; log?: string };
 
   useModel("anthropic/claude-sonnet-5");
 
@@ -94,53 +94,70 @@ function resolvePrompt(failure: Failure, text?: string) { return `…`; }
 `open_pull_request` creates blobs, a tree, a commit, a ref, and the pull
 request: five POSTs under the repository path. `file_issue` is the fallback
 when the tests cannot be made to pass. `github_request(method, path)` exists
-so that out-of-bounds attempts in the runs below are deterministic; it shows
-that the boundary is the connection, not the shape of the tools.
+so that out-of-bounds attempts in run 2 are deterministic; it shows that the
+boundary is the connection, not the shape of the tools.
 
-## 1. A failed job becomes a pull request
+## The trigger
 
-The trigger is the job itself. `.github/workflows/fixture.yml` runs the
-fixture's tests on `fixture-ci` and, when a push fails, posts the log to the
-agent:
+`ci.yml` is an ordinary workflow: install, typecheck, `doctor`, `npm test`,
+on every push and pull request. `resolve.yml` runs when `ci` completes:
 
 ```yaml
-- name: Report the failure to the resolver
-  if: failure() && github.event_name == 'push'
-  run: |
-    node -e '…' > "$RUNNER_TEMP/report.json"   # { text, payload: { repository, ref, sha, job, run, log } }
-    curl -fsS -X POST "$OC_WEBHOOK_URL" -H "Authorization: Bearer $OC_WEBHOOK_TOKEN" \
-      -H "Content-Type: application/json" -H "Idempotency-Key: ${{ github.run_id }}" \
-      --data-binary @"$RUNNER_TEMP/report.json"
+on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+jobs:
+  report:
+    if: github.event.workflow_run.conclusion == 'failure' && github.event.workflow_run.event == 'push'
+    steps:
+      - run: gh run view "$RUN_ID" -R "$REPOSITORY" --log-failed > "$RUNNER_TEMP/failed.log"
+      - run: |
+          node -e '…' > "$RUNNER_TEMP/report.json"   # { text, payload: { repository, ref, sha, job, run, log } }
+          curl -fsS -X POST "$OC_WEBHOOK_URL" -H "Authorization: Bearer $OC_WEBHOOK_TOKEN" \
+            -H "Content-Type: application/json" -H "Idempotency-Key: $RUN_ID" \
+            --data-binary @"$RUNNER_TEMP/report.json"
 ```
 
-Pull requests are not reported, so the agent's own pull requests never
-re-trigger it. `Idempotency-Key: run_id` means a re-run of the job returns the
-original session instead of starting a second one.
+Only failed pushes are reported, so the agent's own pull requests never
+re-trigger it. `Idempotency-Key: run id` means a re-run of the report returns
+the original session instead of starting a second one.
 
-A push to `fixture-ci` ([run 33779624131](https://github.com/diggerhq/opencomputer-example-ci-resolver/actions/runs/33779624131)):
+This step exists because GitHub cannot call the agent's webhook directly:
+GitHub's webhooks are HMAC-signed with GitHub's payload, and the agent's
+webhook takes a bearer token and `{ text, payload }`. A `workflow_run`
+workflow is the translation with no infrastructure to run; native GitHub
+ingress on the platform would remove it.
+
+## 1. A failed run becomes a pull request
+
+A developer pushes a branch with a plausible change,
+[`ebefd92` "refactor: simplify round2"](https://github.com/diggerhq/opencomputer-example-ci-resolver/commit/ebefd9286e71297ab5a4adf3e855b935b3c28cfe),
+which replaces the epsilon-compensated rounding with `Math.round(value * 100) / 100`.
+`ci` fails on the existing half-up regression test
+([run 33780847455](https://github.com/diggerhq/opencomputer-example-ci-resolver/actions/runs/33780847455)),
+`resolve` reports it, and the session runs:
 
 ```text
-fixture / test   not ok 4 - invoiceTotal rounds tax half-up (8.20 at 7.5% is 8.82)   8.81 !== 8.82
-Report the failure to the resolver
-  {"request":{"id":"whr_238dfecd…","sessionId":"f0fd58ca-…","outcome":"accepted"}, …}
+resolve / report   {"request":{"id":"whr_88e091d5…","sessionId":"56ea5b15-…","outcome":"accepted"}, …}
 
 agent.rendered   source webhook  enabledTools [file_issue, github_request, glob, grep, open_pull_request, read, shell, write]
-shell            git clone https://github.com/diggerhq/opencomputer-example-ci-resolver repo; git checkout 29532f90…
-shell            npm test → not ok 4 …  8.81 !== 8.82
-read             fixture/test/invoice.test.js, fixture/src/invoice.js
+shell            git clone https://github.com/diggerhq/opencomputer-example-ci-resolver repo; git checkout ebefd928…
+shell            npm test → not ok 4 - invoiceTotal rounds tax half-up (8.20 at 7.5% is 8.82)   8.81 !== 8.82
 shell            node -e … → 0.6149999999999999  61.499999999999986  61
 shell            npm test → # pass 4  # fail 0
 shell            git rev-parse HEAD HEAD^{tree}
-egress.response  POST …/git/blobs 201   …/git/trees 201   …/git/commits 201
-egress.response  POST …/git/refs 422                        # branch name taken by an earlier run
-egress.response  POST …/git/blobs 201   …/git/trees 201   …/git/commits 201   …/git/refs 201   …/pulls 201
-open_pull_request {"status":201,"url":"https://github.com/diggerhq/opencomputer-example-ci-resolver/pull/9"}
+egress.response  POST /repos/diggerhq/opencomputer-example-ci-resolver/git/blobs      201
+egress.response  POST /repos/diggerhq/opencomputer-example-ci-resolver/git/trees      201
+egress.response  POST /repos/diggerhq/opencomputer-example-ci-resolver/git/commits    201
+egress.response  POST /repos/diggerhq/opencomputer-example-ci-resolver/git/refs       201
+egress.response  POST /repos/diggerhq/opencomputer-example-ci-resolver/pulls          201
+open_pull_request {"status":201,"url":"https://github.com/diggerhq/opencomputer-example-ci-resolver/pull/10"}
 ```
 
-One turn, 13 model steps, 145 seconds, including one retry with a unique
-branch name after GitHub's 422. The result is
-[pull request #9](https://github.com/diggerhq/opencomputer-example-ci-resolver/pull/9),
-whose own `fixture` check passes on the fix. The change:
+One turn, 11 model steps, 99 seconds. The result is
+[pull request #10](https://github.com/diggerhq/opencomputer-example-ci-resolver/pull/10)
+against `refactor/simplify-round2`, whose own `ci` check passes on the fix:
 
 ```diff
  export function round2(value) {
@@ -151,10 +168,10 @@ whose own `fixture` check passes on the fix. The change:
 
 Every read was local git in the VM. Every write was a POST through the
 connection, and the event log records each one with the connection id,
-method, path, and status, GitHub's 422 included.
+method, path, and status.
 
-The runs below use the same payload shape posted by hand, from
-`fixture/*.json`, because they add requests the job would not make.
+The runs below post the same payload shape by hand, from `reports/*.json`,
+because they add requests a job would not make.
 
 ## 2. The same token, a second repository
 
@@ -166,23 +183,21 @@ $ curl -X POST https://api.github.com/repos/diggerhq/opencomputer-example-bug-re
 HTTP 201
 ```
 
-The second fixture adds two requests to the report: file the same report as
-an issue in `diggerhq/opencomputer-example-bug-repro`, and delete the `ci`
-label from this repository.
+The second report adds two requests: file the same report as an issue in
+`diggerhq/opencomputer-example-bug-repro`, and delete the `ci` label from
+this repository.
 
 ```text
-$ curl … -H 'Idempotency-Key: ci-failure-and-more-1' --data-binary @fixture/ci-failure-and-more.json
+$ curl … -H 'Idempotency-Key: ci-failure-and-more-1' --data-binary @reports/ci-failure-and-more.json
 
 file_issue        {"status":403,"error":"{\"error\":{\"code\":\"egress_path_blocked\",\"message\":\"The connection does not allow this path\"}}"}
 github_request    {"status":403,"body":"{\"error\":{\"code\":\"egress_method_blocked\",\"message\":\"The connection does not allow this method\"}}"}
-open_pull_request {"status":201,"url":"…/pull/8"}
+open_pull_request {"status":201,"url":"…"}
 ```
 
 The agent's reply, trimmed:
 
 ```text
-Pull request opened: https://github.com/diggerhq/opencomputer-example-ci-resolver/pull/8
-
 Failed requests:
 1. Filing the issue in diggerhq/opencomputer-example-bug-repro:
    Status: 403  {"error":{"code":"egress_path_blocked","message":"The connection does not allow this path"}}
@@ -200,7 +215,7 @@ and the request text had no say.
 
 ```text
 $ npx opencomputer secrets remove GITHUB_TOKEN
-$ curl … --data-binary @fixture/ci-failure.json
+$ curl … --data-binary @reports/ci-failure.json
 
 open_pull_request {"step":"blob","status":409,"error":"{\"error\":{\"code\":\"secret_unavailable\",\"message\":\"Secret GITHUB_TOKEN is missing or is not allowed for this connection\"}}"}
 ```
@@ -244,7 +259,7 @@ npx opencomputer login
 
 Point the whitelist at your fork: the `pathPrefix` literal in
 `opencomputer/agents/ci-resolver/tools/github.ts` and the `repository`
-field in `fixture/*.json`. Then:
+field in `reports/*.json`. Then:
 
 ```bash
 npx opencomputer deploy --watch --create-project ci-resolver
@@ -254,11 +269,9 @@ gh secret set OC_WEBHOOK_URL      # the URL the previous command printed
 gh secret set OC_WEBHOOK_TOKEN    # the token it printed once
 ```
 
-Push anything to `fixture-ci`. The `fixture` job fails on the branch's
-failing test, reports itself, and the pull request arrives against
-`fixture-ci`, so `main` stays green. Merging the pull request turns the branch
-green; revert the merge to reset the demo. Both workflows report failed
-pushes, so a broken `main` is handled the same way.
+Push a branch with a change that fails `npm test`. `ci` goes red, `resolve`
+reports it, and the pull request arrives against your branch. Merge it and
+the branch is green.
 
 ## Inspect a session
 
@@ -274,17 +287,17 @@ the edge refused appear only in the tool's result, not as egress events; see
 ## Files
 
 ```text
-opencomputer/project.ts                        lists the project's agents
-opencomputer/agents/ci-resolver/agent.ts       the function and its two prompts
+opencomputer/project.ts                         lists the project's agents
+opencomputer/agents/ci-resolver/agent.ts        the function and its two prompts
 opencomputer/agents/ci-resolver/tools/github.ts the whitelist and the three tools
-opencomputer/agents/ci-resolver/opencode.json  harness tools this agent may select
-opencomputer/.env.example                      the secret names the code references
-fixture/src, fixture/test                      the billing module with its failing test
-.github/workflows/fixture.yml                  runs the fixture tests on fixture-ci; reports a failed push
-.github/workflows/ci.yml                       typecheck and doctor on main; same report step
-fixture/ci-failure.json                        the payload shape, for posting a report by hand
-fixture/ci-failure-and-more.json               the same with two out-of-bounds requests (run 2)
-DX-NOTES.md                                    observations from building this against the live platform
+opencomputer/agents/ci-resolver/opencode.json   harness tools this agent may select
+opencomputer/.env.example                       the secret names the code references
+.github/workflows/ci.yml                        ordinary CI: typecheck, doctor, npm test
+.github/workflows/resolve.yml                   reports a failed push to the agent
+billing/src, billing/test                       the module under test and its suite
+reports/ci-failure.json                         the payload shape, for posting a report by hand
+reports/ci-failure-and-more.json                the same with two out-of-bounds requests (run 2)
+DX-NOTES.md                                     observations from building this against the live platform
 ```
 
 ## Limits

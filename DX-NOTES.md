@@ -72,13 +72,24 @@ caller; the webhook response had already returned 202. A resolver wired to a
 real CI relay would silently produce no pull request for that failure. The
 rate limit is OpenRouter's for the platform's account, not the customer's.
 
-## 008 — end to end from a real red job (nice), with one provider error recovered
+## 008 — end to end from a normal CI failure (nice)
 
-Pushing to `fixture-ci` made the `fixture` job fail; its last step posted the
-log to the webhook and received 202 with a session id in the job output. The
-session cloned the exact `sha` from the payload, fixed, went green, and hit
-GitHub's 422 "Reference already exists" because the branch name from an
-earlier run was taken. The 422 is recorded as an `egress.response` like any
-allowed request. The model retried with a suffixed branch name and opened
-PR #9 in 145 s over 13 model steps. The pull request's own `fixture` check
-runs on the fix and passes.
+A branch with a plausible bad commit ("refactor: simplify round2") failed the
+repository's ordinary `ci` workflow. `resolve.yml`, triggered by
+`workflow_run`, fetched the failed job's log with `gh run view --log-failed`
+and posted it to the webhook (202, session id in the job output). The
+session checked out the exact `sha`, reproduced, fixed, went green, and
+opened PR #10 against the branch in 99 s over 11 model steps. The pull
+request's own `ci` check passes on the fix. An earlier variant with a
+dedicated fixture workflow also worked (PR #9, 145 s, including a recovered
+422 "Reference already exists" when a branch name from a previous run was
+taken; the 422 appeared as an `egress.response` like any allowed request).
+
+## 009 — GitHub cannot call the agent's webhook directly (gap)
+
+GitHub's outbound webhooks are HMAC-signed with GitHub's payload; the agent
+webhook takes a bearer token and `{ text, payload }`. Every GitHub-triggered
+example therefore needs a translation step, here a `workflow_run` workflow.
+`gh run view --log-failed` output carries a BOM before each timestamp, which
+`\S` does not match in JavaScript; the first strip regex left the prefix on
+one line.
