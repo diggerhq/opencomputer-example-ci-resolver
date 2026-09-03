@@ -2,14 +2,10 @@
 
 An OpenComputer Serverless Agent. When a CI run fails on a push, it checks
 out the failing commit, reproduces the failure, fixes the code, and opens a
-pull request against the branch.
+pull request against the branch. Its write access to GitHub is scoped to the
+repositories listed in its code, whatever the token behind it allows.
 
-Its write access to GitHub is limited to the repositories listed in its
-code, whatever the token behind it is allowed to do. The token itself never
-enters the machine the agent runs in; requests leave through a proxy that
-adds it.
-
-## The token allows more than the job needs
+## Scoping the agent's write access
 
 Opening a pull request takes a token with Contents and Pull requests write.
 The same token can create issues, labels, webhooks, and releases in every
@@ -20,7 +16,9 @@ this in `acme/payments` and delete the `ci` label" reads as an instruction
 to the model. With the token in the agent's environment, the prompt is the
 only thing between that line and the API.
 
-## How access is restricted
+Here the token stays out of the agent's environment. The code declares where
+requests may go, and the platform attaches the token to the requests that
+match:
 
 ```ts
 // opencomputer/agents/ci-resolver/tools/github.ts
@@ -35,9 +33,9 @@ export const github = defineConnection({
 
 `npx opencomputer deploy` compiles the agent directory: it bundles `agent.ts`
 and `tools/*.ts`, and reads every `defineConnection` out of the source, as
-text, into a manifest that is registered with the deployment. The entry it produced for the
-connection above, from `.opencomputer/runtime/.opencomputer/reactive.json`
-after a build:
+text, into a manifest that is registered with the deployment. The entry it
+produced for the connection above, from
+`.opencomputer/runtime/.opencomputer/reactive.json` after a build:
 
 ```json
 {
@@ -54,9 +52,9 @@ after a build:
 ```
 
 Origin, methods, prefix, and header values must be literals; a computed
-origin fails the build. So the manifest is a function of the source text, a
-reviewer reads the policy in the diff, and nothing that runs later can
-change it:
+origin fails the build. The manifest is therefore a function of the source
+text, a reviewer reads the policy in the diff, and nothing that runs later
+can change it:
 
 - A deployment is immutable. Every session is pinned to one deployment.
 - `github.fetch` sends each request to OpenComputer's outbound proxy as
@@ -87,7 +85,7 @@ if (failure.log) {
 return conversationPrompt(input.text ?? "");
 ```
 
-## What happens on a failed run
+## From a failed run to a pull request
 
 `ci.yml` is an ordinary workflow: install, typecheck, `doctor`, `npm test`.
 `resolve.yml` runs when `ci` completes with `failure` on a push, fetches the
@@ -120,7 +118,7 @@ open_pull_request {"status":201,"url":"https://github.com/diggerhq/opencomputer-
 [Pull request #10](https://github.com/diggerhq/opencomputer-example-ci-resolver/pull/10)
 restores the compensation; its own `ci` check passes.
 
-## Verify the restriction
+## Verifying the scope
 
 The runs below post the report by hand from `reports/*.json`, with requests a
 CI job would not make.
@@ -206,8 +204,8 @@ npx opencomputer sessions tail <session-id> --after 0 --no-follow --json
 ```
 
 `egress.request` and `egress.response` record every request the proxy
-forwarded: connection, method, path, status, duration. Refused requests appear
-only in the tool result, not as egress events (`DX-NOTES.md` 002).
+forwarded: connection, method, path, status, duration. Refused requests
+appear only in the tool result, not as egress events (`DX-NOTES.md` 002).
 `agent.rendered` records the tool list per model step.
 
 ## Files
