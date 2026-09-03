@@ -84,9 +84,9 @@ failed job's log with `gh run view --log-failed`, and posts it to the agent's
 webhook with the run id as the idempotency key. Pull requests are not
 reported, so the agent's own pull requests do not re-trigger it.
 
-GitHub cannot call the agent directly: its webhooks are HMAC-signed with
-GitHub's payload, and the agent's webhook takes a bearer token and
-`{ text, payload }`. The `workflow_run` workflow is the translation.
+GitHub delivers its own webhooks HMAC-signed with GitHub's payload; the
+agent's webhook takes a bearer token and `{ text, payload }`. The
+`workflow_run` workflow translates one into the other.
 
 Commit [`ebefd92`](https://github.com/diggerhq/opencomputer-example-ci-resolver/commit/ebefd9286e71297ab5a4adf3e855b935b3c28cfe)
 on `refactor/simplify-round2` replaced compensated rounding with
