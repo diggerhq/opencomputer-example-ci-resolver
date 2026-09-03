@@ -1,28 +1,25 @@
-name: ci
+name: fixture
 
 on:
   push:
-    branches: [main]
+    branches: [fixture-ci]
   pull_request:
+    branches: [fixture-ci]
 
 jobs:
-  check:
+  test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
-      - run: npm ci
-      - run: |
+      - name: Test
+        run: |
           set -o pipefail
-          npm run typecheck 2>&1 | tee "$RUNNER_TEMP/test.log"
-      - run: |
-          set -o pipefail
-          npx opencomputer doctor 2>&1 | tee -a "$RUNNER_TEMP/test.log"
-      # Same report step as fixture.yml: any failed push hands the job to the
-      # resolver.
+          cd fixture && npm test 2>&1 | tee "$RUNNER_TEMP/test.log"
+      # On a failed push, hand the job to the resolver. Pull requests are not
+      # reported, so the resolver's own pull requests never re-trigger it.
       - name: Report the failure to the resolver
         if: failure() && github.event_name == 'push'
         env:
