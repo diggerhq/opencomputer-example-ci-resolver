@@ -1,217 +1,114 @@
 # CI resolver
 
-An OpenComputer Serverless Agent that takes a failed CI run, reproduces the
-failure, fixes the code, and opens a pull request.
+An OpenComputer Serverless Agent. When a CI run fails on a push, it checks
+out the failing commit, reproduces the failure, fixes the code, and opens a
+pull request against the branch.
 
-Input: a failed GitHub Actions run on a push. A companion workflow posts the
-repository, branch, commit, job name, run URL, and the failed job's log to
-the agent's webhook. Output: a pull request against the branch whose body
-quotes the failing assertion, the cause, the change, and the test output
-before and after. The pull request's own checks then run on the fix.
+It demonstrates one thing: the agent's write access to GitHub is limited to
+the repositories listed in its code. The token behind it is valid for more
+repositories than the agent can reach, and the token never enters the
+machine the agent runs in.
 
-The example exists to show one property: the agent's write access to GitHub
-is a whitelist of repositories written in code, compiled into the deployment,
-and enforced outside the machine the agent runs in. The token behind it is
-valid for more repositories than the agent can reach.
-
-What the example shows:
-
-- One `defineConnection` literal is the whitelist. The compiler copies it
-  into the deployment manifest; the edge checks every outbound request
-  against it before attaching the token. Adding a repository is adding a
-  literal and deploying; the diff is the policy change.
-- The same token, used directly, writes to a second repository. Through the
-  agent, the same request is refused with 403 before the token is touched.
-- The agent runs untrusted code (the repository's own test suite) in a VM
-  that holds no credential. Reads are local git; writes are HTTP POSTs
-  through the connection.
-- The value of the secret is outside the digest. Removing it stops the
-  running agent at its next write with 409. Changing what the agent may
-  reach is a deployment.
-
-## The whitelist
+## How access is restricted
 
 ```ts
-// Excerpt of opencomputer/agents/ci-resolver/tools/github.ts.
+// opencomputer/agents/ci-resolver/tools/github.ts
 export const github = defineConnection({
   id: "github",
   origin: "https://api.github.com",
   methods: ["POST"],
   pathPrefix: "/repos/diggerhq/opencomputer-example-ci-resolver/",
-  headers: { Authorization: bearer(useSecret("GITHUB_TOKEN")), /* Accept, User-Agent */ },
+  headers: { Authorization: bearer(useSecret("GITHUB_TOKEN")) },
 });
 ```
 
-`useSecret` returns a reference, not a value; code never sees the token.
-Every tool in the file calls `github.fetch(path, init)`. After a build, the
-manifest at `.opencomputer/runtime/.opencomputer/reactive.json` contains:
+- The compiler copies this literal into the deployment manifest. Every
+  session is pinned to one deployment.
+- Each outbound request from a tool goes to the platform edge as
+  `(connection, method, path)`. The edge checks the method and the path
+  prefix against the pinned deployment, then attaches the secret. Requests
+  outside the prefix are refused before the secret is read.
+- `useSecret` is a reference. The value is set with
+  `secrets set GITHUB_TOKEN --value-stdin` and stored outside the
+  deployment. The agent's VM never holds it.
+- Reads are local: `git clone`, `git checkout <sha>`, `npm test`. Writes are
+  POSTs through the connection: blobs, tree, commit, ref, pull request.
 
-```text
-tools:      file_issue, github_request, glob, grep, open_pull_request, read, shell, write
-connection: github  POST  https://api.github.com/repos/diggerhq/opencomputer-example-ci-resolver/
-```
-
-The secret is set once per environment and never enters the repository:
-
-```text
-$ npx opencomputer secrets set GITHUB_TOKEN --value-stdin < ~/.pat
-Set GITHUB_TOKEN for project (development); allowed for https://api.github.com.
-```
-
-The secret's own scope is the origin. The repository restriction is the
-connection's, and the connection is in the deployment.
-
-## The agent
+The agent function attaches the harness's shell and filesystem plus three
+GitHub tools when a report arrives, and nothing when it does not:
 
 ```ts
-// Simplified excerpt of opencomputer/agents/ci-resolver/agent.ts.
-export default function Agent() {
-  const input = useInput();
-  const failure = (input.payload ?? {}) as { repository?: string; ref?: string; sha?: string; job?: string; run?: string; log?: string };
-
-  useModel("anthropic/claude-sonnet-5");
-
-  if (failure.log) {
-    // A CI failure report: shell and filesystem to reproduce and fix, and
-    // three tools that write to GitHub through the one connection.
-    // Omitted here: the file also selects read, write, glob, grep.
-    useTool("shell");
-    useTool(openPullRequest);
-    useTool(fileIssue);
-    useTool(githubRequest);
-    return resolvePrompt(failure, input.text);
-  } else {
-    // No report: conversation. The model request carries no tools.
-    return conversationPrompt(input.text ?? "");
-  }
+// opencomputer/agents/ci-resolver/agent.ts, simplified
+if (failure.log) {
+  useTool("shell");            // also read, write, glob, grep
+  useTool(openPullRequest);    // five POSTs under the repository path
+  useTool(fileIssue);          // fallback when the tests stay red
+  useTool(githubRequest);      // any request, to show the edge decides
+  return resolvePrompt(failure, input.text);
 }
-
-// Omitted here: the prompt text. See agent.ts.
-function conversationPrompt(text: string) { return `…`; }
-function resolvePrompt(failure: Failure, text?: string) { return `…`; }
+return conversationPrompt(input.text ?? "");
 ```
 
-`open_pull_request` creates blobs, a tree, a commit, a ref, and the pull
-request: five POSTs under the repository path. `file_issue` is the fallback
-when the tests cannot be made to pass. `github_request(method, path)` exists
-so that out-of-bounds attempts in run 2 are deterministic; it shows that the
-boundary is the connection, not the shape of the tools.
+## What happens on a failed run
 
-## The trigger
+`ci.yml` is an ordinary workflow: install, typecheck, `doctor`, `npm test`.
+`resolve.yml` runs when `ci` completes with `failure` on a push, fetches the
+failed job's log with `gh run view --log-failed`, and posts it to the agent's
+webhook with the run id as the idempotency key. Pull requests are not
+reported, so the agent's own pull requests do not re-trigger it.
 
-`ci.yml` is an ordinary workflow: install, typecheck, `doctor`, `npm test`,
-on every push and pull request. `resolve.yml` runs when `ci` completes:
+GitHub cannot call the agent directly: its webhooks are HMAC-signed with
+GitHub's payload, and the agent's webhook takes a bearer token and
+`{ text, payload }`. The `workflow_run` workflow is the translation.
 
-```yaml
-on:
-  workflow_run:
-    workflows: [ci]
-    types: [completed]
-jobs:
-  report:
-    if: github.event.workflow_run.conclusion == 'failure' && github.event.workflow_run.event == 'push'
-    steps:
-      - run: gh run view "$RUN_ID" -R "$REPOSITORY" --log-failed > "$RUNNER_TEMP/failed.log"
-      - run: |
-          node -e '…' > "$RUNNER_TEMP/report.json"   # { text, payload: { repository, ref, sha, job, run, log } }
-          curl -fsS -X POST "$OC_WEBHOOK_URL" -H "Authorization: Bearer $OC_WEBHOOK_TOKEN" \
-            -H "Content-Type: application/json" -H "Idempotency-Key: $RUN_ID" \
-            --data-binary @"$RUNNER_TEMP/report.json"
-```
-
-Only failed pushes are reported, so the agent's own pull requests never
-re-trigger it. `Idempotency-Key: run id` means a re-run of the report returns
-the original session instead of starting a second one.
-
-This step exists because GitHub cannot call the agent's webhook directly:
-GitHub's webhooks are HMAC-signed with GitHub's payload, and the agent's
-webhook takes a bearer token and `{ text, payload }`. A `workflow_run`
-workflow is the translation with no infrastructure to run; native GitHub
-ingress on the platform would remove it.
-
-## 1. A failed run becomes a pull request
-
-A developer pushes a branch with a plausible change,
-[`ebefd92` "refactor: simplify round2"](https://github.com/diggerhq/opencomputer-example-ci-resolver/commit/ebefd9286e71297ab5a4adf3e855b935b3c28cfe),
-which replaces the epsilon-compensated rounding with `Math.round(value * 100) / 100`.
-`ci` fails on the existing half-up regression test
-([run 33780847455](https://github.com/diggerhq/opencomputer-example-ci-resolver/actions/runs/33780847455)),
-`resolve` reports it, and the session runs:
+Commit [`ebefd92`](https://github.com/diggerhq/opencomputer-example-ci-resolver/commit/ebefd9286e71297ab5a4adf3e855b935b3c28cfe)
+on `refactor/simplify-round2` replaced compensated rounding with
+`Math.round(value * 100) / 100`. The existing half-up test caught it
+([run 33780847455](https://github.com/diggerhq/opencomputer-example-ci-resolver/actions/runs/33780847455)):
 
 ```text
-resolve / report   {"request":{"id":"whr_88e091d5…","sessionId":"56ea5b15-…","outcome":"accepted"}, …}
+resolve / report   {"request":{"sessionId":"56ea5b15-…","outcome":"accepted"}}
 
-agent.rendered   source webhook  enabledTools [file_issue, github_request, glob, grep, open_pull_request, read, shell, write]
-shell            git clone https://github.com/diggerhq/opencomputer-example-ci-resolver repo; git checkout ebefd928…
+agent.rendered   enabledTools [file_issue, github_request, glob, grep, open_pull_request, read, shell, write]
+shell            git clone …; git checkout ebefd928…
 shell            npm test → not ok 4 - invoiceTotal rounds tax half-up (8.20 at 7.5% is 8.82)   8.81 !== 8.82
 shell            node -e … → 0.6149999999999999  61.499999999999986  61
 shell            npm test → # pass 4  # fail 0
-shell            git rev-parse HEAD HEAD^{tree}
-egress.response  POST /repos/diggerhq/opencomputer-example-ci-resolver/git/blobs      201
-egress.response  POST /repos/diggerhq/opencomputer-example-ci-resolver/git/trees      201
-egress.response  POST /repos/diggerhq/opencomputer-example-ci-resolver/git/commits    201
-egress.response  POST /repos/diggerhq/opencomputer-example-ci-resolver/git/refs       201
-egress.response  POST /repos/diggerhq/opencomputer-example-ci-resolver/pulls          201
+egress.response  POST …/git/blobs 201   …/git/trees 201   …/git/commits 201   …/git/refs 201   …/pulls 201
 open_pull_request {"status":201,"url":"https://github.com/diggerhq/opencomputer-example-ci-resolver/pull/10"}
 ```
 
-One turn, 11 model steps, 99 seconds. The result is
-[pull request #10](https://github.com/diggerhq/opencomputer-example-ci-resolver/pull/10)
-against `refactor/simplify-round2`, whose own `ci` check passes on the fix:
+11 model steps, 99 seconds.
+[Pull request #10](https://github.com/diggerhq/opencomputer-example-ci-resolver/pull/10)
+restores the compensation; its own `ci` check passes.
 
-```diff
- export function round2(value) {
--  return Math.round(value * 100) / 100;
-+  return Math.round((value + Number.EPSILON) * 100) / 100;
- }
-```
+## Verify the restriction
 
-Every read was local git in the VM. Every write was a POST through the
-connection, and the event log records each one with the connection id,
-method, path, and status.
+The runs below post the report by hand from `reports/*.json`, with requests a
+CI job would not make.
 
-The runs below post the same payload shape by hand, from `reports/*.json`,
-because they add requests a job would not make.
+### A repository the token can access but the agent cannot
 
-## 2. The same token, a second repository
-
-The PAT behind `GITHUB_TOKEN` covers two repositories. From a laptop:
+The token covers `opencomputer-example-bug-repro` as well. Directly:
 
 ```text
 $ curl -X POST https://api.github.com/repos/diggerhq/opencomputer-example-bug-repro/issues \
-    -H "Authorization: Bearer $PAT" -d '{"title":"token reach check","body":"…"}'
+    -H "Authorization: Bearer $PAT" -d '{"title":"…","body":"…"}'
 HTTP 201
 ```
 
-The second report adds two requests: file the same report as an issue in
-`diggerhq/opencomputer-example-bug-repro`, and delete the `ci` label from
-this repository.
+Through the agent, with `reports/ci-failure-and-more.json` asking it to file
+the same report there and to delete a label here:
 
 ```text
-$ curl … -H 'Idempotency-Key: ci-failure-and-more-1' --data-binary @reports/ci-failure-and-more.json
-
-file_issue        {"status":403,"error":"{\"error\":{\"code\":\"egress_path_blocked\",\"message\":\"The connection does not allow this path\"}}"}
-github_request    {"status":403,"body":"{\"error\":{\"code\":\"egress_method_blocked\",\"message\":\"The connection does not allow this method\"}}"}
-open_pull_request {"status":201,"url":"…"}
+file_issue      {"status":403,"error":"{\"error\":{\"code\":\"egress_path_blocked\",\"message\":\"The connection does not allow this path\"}}"}
+github_request  {"status":403,"body":"{\"error\":{\"code\":\"egress_method_blocked\",\"message\":\"The connection does not allow this method\"}}"}
 ```
 
-The agent's reply, trimmed:
+The edge refused both against the pinned deployment before resolving the
+secret. The pull request for the fix was still opened.
 
-```text
-Failed requests:
-1. Filing the issue in diggerhq/opencomputer-example-bug-repro:
-   Status: 403  {"error":{"code":"egress_path_blocked","message":"The connection does not allow this path"}}
-   This repository's issue-filing path is blocked for me — I cannot reach it.
-2. Deleting the ci label from diggerhq/opencomputer-example-ci-resolver:
-   Status: 403  {"error":{"code":"egress_method_blocked","message":"The connection does not allow this method"}}
-   DELETE requests are blocked on this connection.
-```
-
-The token would have allowed both. The edge refused both against the pinned
-deployment's connection before resolving the secret. The agent, the model,
-and the request text had no say.
-
-## 3. The value is outside the digest
+### Secret removed
 
 ```text
 $ npx opencomputer secrets remove GITHUB_TOKEN
@@ -220,58 +117,49 @@ $ curl … --data-binary @reports/ci-failure.json
 open_pull_request {"step":"blob","status":409,"error":"{\"error\":{\"code\":\"secret_unavailable\",\"message\":\"Secret GITHUB_TOKEN is missing or is not allowed for this connection\"}}"}
 ```
 
-Same deployment, same digest. The agent reproduced and fixed the failure as
-before; its first write, the blob for the changed file, stopped at the edge
-with 409. Setting the secret again restores the path without a deploy.
+Same deployment. The agent reproduced and fixed the failure; the first
+write stopped. Removing the secret cuts access for every session at its next
+write, with no deploy.
 
-Two rules follow. To cut access now, remove the secret: the next write from
-any session fails. To change what the agent may reach, change the literal
-and deploy: sessions already running keep the deployment they started with.
-
-## 4. Widening is a code review
+### Adding a repository
 
 ```diff
- export const github = defineConnection({ … pathPrefix: "/repos/diggerhq/opencomputer-example-ci-resolver/" … });
 +export const githubBugRepro = defineConnection({
 +  id: "github-bug-repro",
 +  origin: "https://api.github.com",
 +  methods: ["POST"],
 +  pathPrefix: "/repos/diggerhq/opencomputer-example-bug-repro/",
-+  headers: { Authorization: bearer(useSecret("GITHUB_TOKEN")), … },
++  headers: { Authorization: bearer(useSecret("GITHUB_TOKEN")) },
 +});
 ```
 
-A second repository is a second connection. The next deployment has a new
-digest and the manifest lists two connections; the pull request that adds
-it is the place the change gets reviewed.
+A second repository is a second connection and a new deployment. Sessions
+already running keep the deployment they started with.
 
-## Run
+## Run it
 
 Requires Node 22, an OpenComputer account, and a fine-grained GitHub token
 with Contents, Pull requests, and Issues write on a repository you own.
 
 ```bash
 git clone https://github.com/diggerhq/opencomputer-example-ci-resolver.git
-cd opencomputer-example-ci-resolver
-npm install
+cd opencomputer-example-ci-resolver && npm install
 npx opencomputer login
 ```
 
-Point the whitelist at your fork: the `pathPrefix` literal in
-`opencomputer/agents/ci-resolver/tools/github.ts` and the `repository`
-field in `reports/*.json`. Then:
+Change `pathPrefix` in `opencomputer/agents/ci-resolver/tools/github.ts` and
+`repository` in `reports/*.json` to your fork. Then:
 
 ```bash
 npx opencomputer deploy --watch --create-project ci-resolver
 npx opencomputer secrets set GITHUB_TOKEN --value-stdin < ~/.pat
 npx opencomputer webhooks create ci --agent ci-resolver --environment development
-gh secret set OC_WEBHOOK_URL      # the URL the previous command printed
-gh secret set OC_WEBHOOK_TOKEN    # the token it printed once
+gh secret set OC_WEBHOOK_URL      # printed by the previous command
+gh secret set OC_WEBHOOK_TOKEN    # printed once
 ```
 
-Push a branch with a change that fails `npm test`. `ci` goes red, `resolve`
-reports it, and the pull request arrives against your branch. Merge it and
-the branch is green.
+Push a branch with a change that fails `npm test`. The pull request arrives
+against that branch.
 
 ## Inspect a session
 
@@ -280,44 +168,35 @@ npx opencomputer sessions tail <session-id> --after 0 --no-follow --json
 ```
 
 `egress.request` and `egress.response` record every request the edge let
-through, with connection id, method, path, status, and duration. Requests
-the edge refused appear only in the tool's result, not as egress events; see
-`DX-NOTES.md` 002. `agent.rendered` records the tool list per model step.
+through: connection, method, path, status, duration. Refused requests appear
+only in the tool result, not as egress events (`DX-NOTES.md` 002).
+`agent.rendered` records the tool list per model step.
 
 ## Files
 
 ```text
-opencomputer/project.ts                         lists the project's agents
-opencomputer/agents/ci-resolver/agent.ts        the function and its two prompts
-opencomputer/agents/ci-resolver/tools/github.ts the whitelist and the three tools
-opencomputer/agents/ci-resolver/opencode.json   harness tools this agent may select
-opencomputer/.env.example                       the secret names the code references
-.github/workflows/ci.yml                        ordinary CI: typecheck, doctor, npm test
-.github/workflows/resolve.yml                   reports a failed push to the agent
-billing/src, billing/test                       the module under test and its suite
-reports/ci-failure.json                         the payload shape, for posting a report by hand
-reports/ci-failure-and-more.json                the same with two out-of-bounds requests (run 2)
-DX-NOTES.md                                     observations from building this against the live platform
+opencomputer/agents/ci-resolver/tools/github.ts   the connection and the three tools
+opencomputer/agents/ci-resolver/agent.ts          the function and its two prompts
+opencomputer/agents/ci-resolver/opencode.json     harness tools this agent may select
+.github/workflows/ci.yml                          ordinary CI
+.github/workflows/resolve.yml                     reports a failed push to the agent
+billing/                                          the module under test and its suite
+reports/                                          payloads for posting a report by hand
+DX-NOTES.md                                       observations against the live platform
 ```
 
 ## Limits
 
-- `pathPrefix` is a string prefix. Keep the trailing slash, or
-  `/repos/o/r` also matches `/repos/o/r-other/`. Under the prefix, `POST` still
-  reaches endpoints such as `hooks` and `keys`; whether they succeed depends
-  on the token's permissions, which remain the second gate. Finer than a
-  repository means one connection per endpoint family.
-- The repository is public, so reads are `git clone` without credentials. A
-  private repository is read through the connection: `GET
-  …/tarball/<sha>` with a declared redirect to `codeload.github.com`.
-- The request text is data. Asking the agent in the request to stop early
-  did not change its behaviour; a dry-run mode belongs in the payload and the
-  render. See `DX-NOTES.md` 003.
+- `pathPrefix` is a string prefix. Keep the trailing slash: `/repos/o/r`
+  also matches `/repos/o/r-other/`. Under the prefix, `POST` still reaches
+  `hooks`, `keys`, and similar; the token's permissions are the second gate.
+- Reads are unauthenticated `git clone`, so the repository must be public. A
+  private repository is read through the connection with `GET …/tarball/<sha>`
+  and a declared redirect to `codeload.github.com`.
 - The repository's scripts run inside the session VM. Treat the target
-  repository as untrusted code. The VM holds no credentials.
+  repository as untrusted code; the VM holds no credentials.
 
-Docs: [How it works](https://docs.opencomputer.dev/agents/mental-model) ·
-[Secrets](https://docs.opencomputer.dev/agents/secrets) ·
+Docs: [Secrets](https://docs.opencomputer.dev/agents/secrets) ·
 [Tools](https://docs.opencomputer.dev/agents/tools) ·
 [Webhooks](https://docs.opencomputer.dev/agents/webhooks) ·
 [Sessions](https://docs.opencomputer.dev/agents/sessions)
