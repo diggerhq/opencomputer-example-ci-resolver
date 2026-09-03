@@ -7,7 +7,7 @@ export default function Agent() {
   const input = useInput();
   const failure = (input.payload ?? {}) as Failure;
 
-  useModel("google/gemini-3.8-flash");
+  useModel("anthropic/claude-sonnet-5");
 
   if (failure.log) {
     // A CI failure report: the agent gets the harness's shell and filesystem
