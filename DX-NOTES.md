@@ -71,3 +71,14 @@ session, but nothing retries the model call and nothing tells the webhook
 caller; the webhook response had already returned 202. A resolver wired to a
 real CI relay would silently produce no pull request for that failure. The
 rate limit is OpenRouter's for the platform's account, not the customer's.
+
+## 008 — end to end from a real red job (nice), with one provider error recovered
+
+Pushing to `fixture-ci` made the `fixture` job fail; its last step posted the
+log to the webhook and received 202 with a session id in the job output. The
+session cloned the exact `sha` from the payload, fixed, went green, and hit
+GitHub's 422 "Reference already exists" because the branch name from an
+earlier run was taken. The 422 is recorded as an `egress.response` like any
+allowed request. The model retried with a suffixed branch name and opened
+PR #9 in 145 s over 13 model steps. The pull request's own `fixture` check
+runs on the fix and passes.
