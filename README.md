@@ -42,7 +42,7 @@ if (failure.log) {
   useTool("shell");            // also read, write, glob, grep
   useTool(openPullRequest);    // five POSTs under the repository path
   useTool(fileIssue);          // fallback when the tests stay red
-  useTool(githubRequest);      // any request, to show the edge decides
+  useTool(githubRequest);      // any method and path; the edge decides
   return resolvePrompt(failure, input.text);
 }
 return conversationPrompt(input.text ?? "");
