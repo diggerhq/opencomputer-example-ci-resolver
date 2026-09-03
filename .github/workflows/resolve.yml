@@ -33,7 +33,7 @@ jobs:
           node -e '
             const fs = require("fs");
             const log = fs.readFileSync(process.env.RUNNER_TEMP + "/failed.log", "utf8")
-              .split("\n").map((l) => l.replace(/^[^\t]*\t[^\t]*\t﻿?\S+ /, "")).slice(-80).join("\n");
+              .split("\n").map((l) => l.replace(/^[^\t]*\t[^\t]*\t\uFEFF?\S+ /, "")).slice(-80).join("\n");
             const { REPOSITORY, REF, SHA, JOB, RUN_URL } = process.env;
             process.stdout.write(JSON.stringify({
               text: `CI failed: ${JOB} on ${REF}. Fix it and open a pull request.`,
