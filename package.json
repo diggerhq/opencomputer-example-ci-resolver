@@ -1,5 +1,5 @@
 {
-  "name": "opencomputer-example-issue-filer",
+  "name": "opencomputer-example-ci-resolver",
   "version": "0.1.0",
   "private": true,
   "type": "module",

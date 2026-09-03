@@ -1,4 +1,4 @@
 export default {
-  name: "opencomputer-example-issue-filer",
-  agents: ["issue-filer"],
+  name: "opencomputer-example-ci-resolver",
+  agents: ["ci-resolver"],
 };
