@@ -5,8 +5,8 @@ out the failing commit, reproduces the failure, fixes the code, and opens a
 pull request against the branch.
 
 Its write access to GitHub is limited to the repositories listed in its
-code. The token behind it is valid for more repositories than the agent can
-reach, and it never enters the machine the agent runs in.
+code, whatever the token behind it is allowed to do. The token itself never
+enters the machine the agent runs in.
 
 ## How access is restricted
 
